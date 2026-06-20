@@ -1,0 +1,19 @@
+# 大文件 - 模型缓存 & 视频/图片数据
+embeddings_cache.pt
+classifier_head.pt
+*.avi
+*.mp4
+*.jpg
+*.jpeg
+*.png
+
+# API Key
+.api_key
+
+# Python
+__pycache__/
+*.pyc
+
+# 用户数据文件夹
+HOCM玛法凯泰 影像/
+体检中心影像/
