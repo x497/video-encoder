@@ -178,12 +178,13 @@ class QwenVLEmbeddingAPI:
     def _encode_video_smart(
         self, video_path: str, text: str = "", instruction: str = ""
     ) -> np.ndarray:
-        """智能视频编码：小视频直接传，大视频压缩后传"""
-        max_size = 10 * 1024 * 1024  # DashScope 10MB 限制
+        """智能视频编码：<=20MB 直接传，>20MB 轻量压缩"""
+        max_size = 15 * 1024 * 1024  # base64膨胀1.33x后 <= 20MB
         file_size = os.path.getsize(video_path)
+        frame_count = self._get_video_frame_count(video_path)
 
-        if file_size <= max_size:
-            # 直接传
+        if file_size <= max_size and frame_count >= 2:
+            # 直接传原始视频
             video_b64 = self._encode_video_to_base64(video_path)
             contents = [{"video": video_b64}]
             if instruction:
@@ -192,39 +193,35 @@ class QwenVLEmbeddingAPI:
                 contents.append({"text": text})
             return self._call_api(contents)
 
-        # 大视频：压缩
-        print(f"  [Video] {os.path.basename(video_path)} 太大 ({file_size/1024/1024:.1f}MB), 压缩中...")
-        compressed_path = self._compress_video(video_path, max_size_mb=9)
-        if compressed_path and os.path.exists(compressed_path):
+        # 需要压缩（>20MB 或帧数不足）
+        reason = f"太大 ({file_size/1024/1024:.1f}MB)" if file_size > max_size else f"帧数不足({frame_count})"
+        print(f"  [Video] {os.path.basename(video_path)} {reason}, 压缩中...")
+        compressed_path = self._compress_video(video_path, max_size_mb=19)
+        if compressed_path and os.path.exists(compressed_path) and os.path.getsize(compressed_path) > 0:
             new_size = os.path.getsize(compressed_path)
             print(f"    压缩后: {new_size/1024/1024:.1f}MB")
-            if new_size <= max_size:
-                video_b64 = self._encode_video_to_base64(compressed_path)
-                contents = [{"video": video_b64}]
-                if instruction:
-                    contents.append({"text": instruction})
-                if text:
-                    contents.append({"text": text})
-                result = self._call_api(contents)
-                try:
-                    os.remove(compressed_path)
-                except:
-                    pass
-                return result
-
-        # 如果压缩后还是大，用抽帧（但 multimodal-embedding-v1 只支持1张图，取中间帧）
-        print(f"    压缩不够小，改用单帧方案")
-        try:
-            frame_b64 = self._extract_single_frame(video_path)
-            contents = [{"image": frame_b64}]
+            video_b64 = self._encode_video_to_base64(compressed_path)
+            contents = [{"video": video_b64}]
             if instruction:
                 contents.append({"text": instruction})
             if text:
                 contents.append({"text": text})
-            return self._call_api(contents)
-        except Exception as e:
-            print(f"    抽帧失败: {e}, 跳过此视频")
-            raise
+            result = self._call_api(contents)
+            try:
+                os.remove(compressed_path)
+            except:
+                pass
+            return result
+
+        # 回退：单帧图片
+        print(f"    压缩失败，改用单帧方案")
+        frame_b64 = self._extract_single_frame(video_path)
+        contents = [{"image": frame_b64}]
+        if instruction:
+            contents.append({"text": instruction})
+        if text:
+            contents.append({"text": text})
+        return self._call_api(contents)
 
     def encode_video_with_frames(
         self, video_path: str, text: str = "", instruction: str = "", num_frames: int = 8
@@ -241,6 +238,18 @@ class QwenVLEmbeddingAPI:
     # ============================================================
     # 工具方法
     # ============================================================
+
+    @staticmethod
+    def _get_video_frame_count(video_path: str) -> int:
+        """获取视频总帧数"""
+        try:
+            import cv2
+            cap = cv2.VideoCapture(video_path)
+            count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            cap.release()
+            return count
+        except:
+            return 999  # 假设够用
 
     @staticmethod
     def _compress_video(video_path: str, max_size_mb: float = 9.0) -> str:

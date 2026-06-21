@@ -53,8 +53,8 @@ class Config:
     
     # DashScope API
     api_key = None  # 从环境变量 DASHSCOPE_API_KEY 或 .api_key 文件读取
-    model_name = "multimodal-embedding-v1"  # 当前可用; 开通后改为 "qwen3-vl-embedding-2b"
-    embedding_dim = 1024   # multimodal-embedding-v1: 1024; qwen3-vl-embedding-2b: 2048
+    model_name = "qwen3-vl-embedding"  # 2560 维
+    embedding_dim = 2560
     hidden_dims = [512, 128]
     dropout = 0.3
     num_classes = 2

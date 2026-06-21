@@ -25,8 +25,8 @@ from dataset import collect_samples, load_view_descriptions, normalize_view, get
 def load_model(
     api_key: str,
     classifier_path: str = "classifier_head.pt",
-    model_name: str = "multimodal-embedding-v1",  # 可改为 "qwen3-vl-embedding-2b"
-    embedding_dim: int = 1024,  # multimodal-embedding-v1: 1024; qwen3-vl-embedding-2b: 2048
+    model_name: str = "qwen3-vl-embedding",  # 2560维
+    embedding_dim: int = 2560,
     hidden_dims: list = [512, 128],
     device: str = "cpu",
 ):
