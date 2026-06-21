@@ -178,43 +178,57 @@ class QwenVLEmbeddingAPI:
     def _encode_video_smart(
         self, video_path: str, text: str = "", instruction: str = ""
     ) -> np.ndarray:
-        """智能视频编码：<=20MB 直接传，>20MB 轻量压缩"""
+        """智能视频编码：≤15MB+≥2帧直传，否则压缩，失败回退单帧图片"""
         max_size = 15 * 1024 * 1024  # base64膨胀1.33x后 <= 20MB
         file_size = os.path.getsize(video_path)
         frame_count = self._get_video_frame_count(video_path)
 
+        # 路径1：直传原始视频
         if file_size <= max_size and frame_count >= 2:
-            # 直接传原始视频
-            video_b64 = self._encode_video_to_base64(video_path)
-            contents = [{"video": video_b64}]
-            if instruction:
-                contents.append({"text": instruction})
-            if text:
-                contents.append({"text": text})
-            return self._call_api(contents)
+            try:
+                video_b64 = self._encode_video_to_base64(video_path)
+                contents = [{"video": video_b64}]
+                if instruction:
+                    contents.append({"text": instruction})
+                if text:
+                    contents.append({"text": text})
+                return self._call_api(contents)
+            except Exception as e:
+                print(f"  [Video] 直传失败: {e}, 尝试压缩...")
 
-        # 需要压缩（>20MB 或帧数不足）
+        # 路径2：ffmpeg 压缩
         reason = f"太大 ({file_size/1024/1024:.1f}MB)" if file_size > max_size else f"帧数不足({frame_count})"
-        print(f"  [Video] {os.path.basename(video_path)} {reason}, 压缩中...")
+        if file_size <= max_size and frame_count >= 2:
+            print(f"  [Video] {os.path.basename(video_path)} 直传失败，压缩中...")
+        else:
+            print(f"  [Video] {os.path.basename(video_path)} {reason}, 压缩中...")
+            
         compressed_path = self._compress_video(video_path, max_size_mb=19)
         if compressed_path and os.path.exists(compressed_path) and os.path.getsize(compressed_path) > 0:
             new_size = os.path.getsize(compressed_path)
             print(f"    压缩后: {new_size/1024/1024:.1f}MB")
-            video_b64 = self._encode_video_to_base64(compressed_path)
-            contents = [{"video": video_b64}]
-            if instruction:
-                contents.append({"text": instruction})
-            if text:
-                contents.append({"text": text})
-            result = self._call_api(contents)
             try:
-                os.remove(compressed_path)
-            except:
-                pass
-            return result
+                video_b64 = self._encode_video_to_base64(compressed_path)
+                contents = [{"video": video_b64}]
+                if instruction:
+                    contents.append({"text": instruction})
+                if text:
+                    contents.append({"text": text})
+                result = self._call_api(contents)
+                try:
+                    os.remove(compressed_path)
+                except:
+                    pass
+                return result
+            except Exception as e:
+                print(f"    压缩后仍失败: {e}, 回退单帧...")
+                try:
+                    os.remove(compressed_path)
+                except:
+                    pass
 
-        # 回退：单帧图片
-        print(f"    压缩失败，改用单帧方案")
+        # 路径3：终极回退 - 单帧图片
+        print(f"    回退单帧图片...")
         frame_b64 = self._extract_single_frame(video_path)
         contents = [{"image": frame_b64}]
         if instruction:
