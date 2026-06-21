@@ -57,6 +57,7 @@ class QwenVLEmbeddingAPI:
         self.endpoint = endpoint or self._ENDPOINT
         self.max_retries = max_retries
         self.embedding_dim = self.EMBEDDING_DIMS.get(model_name, 2048)
+        self.stats = {"直传视频": 0, "压缩视频": 0, "回退图片": 0, "图片": 0}
 
         print(f"[EmbeddingAPI] 初始化完成 (DashScope)")
         print(f"  Model: {model_name}, Dim: {self.embedding_dim}")
@@ -163,7 +164,9 @@ class QwenVLEmbeddingAPI:
             contents.append({"text": instruction})
         if text:
             contents.append({"text": text})
-        return self._call_api(contents)
+        result = self._call_api(contents)
+        self.stats["图片"] += 1
+        return result
 
     def encode_video(self, video_path: str) -> np.ndarray:
         """纯视频编码（自动处理大视频：压缩或抽帧）"""
@@ -178,8 +181,8 @@ class QwenVLEmbeddingAPI:
     def _encode_video_smart(
         self, video_path: str, text: str = "", instruction: str = ""
     ) -> np.ndarray:
-        """智能视频编码：≤15MB+≥2帧直传，否则压缩，失败回退单帧图片"""
-        max_size = 15 * 1024 * 1024  # base64膨胀1.33x后 <= 20MB
+        """智能视频编码：≤13MB+≥2帧直传，否则压缩，失败回退单帧图片"""
+        max_size = 13 * 1024 * 1024  # base64膨胀后<20MB data-uri限制
         file_size = os.path.getsize(video_path)
         frame_count = self._get_video_frame_count(video_path)
 
@@ -192,7 +195,9 @@ class QwenVLEmbeddingAPI:
                     contents.append({"text": instruction})
                 if text:
                     contents.append({"text": text})
-                return self._call_api(contents)
+                result = self._call_api(contents)
+                self.stats["直传视频"] += 1
+                return result
             except Exception as e:
                 print(f"  [Video] 直传失败: {e}, 尝试压缩...")
 
@@ -215,6 +220,7 @@ class QwenVLEmbeddingAPI:
                 if text:
                     contents.append({"text": text})
                 result = self._call_api(contents)
+                self.stats["压缩视频"] += 1
                 try:
                     os.remove(compressed_path)
                 except:
@@ -235,7 +241,9 @@ class QwenVLEmbeddingAPI:
             contents.append({"text": instruction})
         if text:
             contents.append({"text": text})
-        return self._call_api(contents)
+        result = self._call_api(contents)
+        self.stats["回退图片"] += 1
+        return result
 
     def encode_video_with_frames(
         self, video_path: str, text: str = "", instruction: str = "", num_frames: int = 8
