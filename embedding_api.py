@@ -57,6 +57,7 @@ class QwenVLEmbeddingAPI:
         self.endpoint = endpoint or self._ENDPOINT
         self.max_retries = max_retries
         self.embedding_dim = self.EMBEDDING_DIMS.get(model_name, 2048)
+        self.stats = {"直传视频": 0, "压缩视频": 0, "回退图片": 0, "图片": 0}
 
         print(f"[EmbeddingAPI] 初始化完成 (DashScope)")
         print(f"  Model: {model_name}, Dim: {self.embedding_dim}")
@@ -163,7 +164,9 @@ class QwenVLEmbeddingAPI:
             contents.append({"text": instruction})
         if text:
             contents.append({"text": text})
-        return self._call_api(contents)
+        result = self._call_api(contents)
+        self.stats["图片"] += 1
+        return result
 
     def encode_video(self, video_path: str) -> np.ndarray:
         """纯视频编码（自动处理大视频：压缩或抽帧）"""
@@ -178,27 +181,19 @@ class QwenVLEmbeddingAPI:
     def _encode_video_smart(
         self, video_path: str, text: str = "", instruction: str = ""
     ) -> np.ndarray:
-        """智能视频编码：小视频直接传，大视频压缩后传"""
-        max_size = 10 * 1024 * 1024  # DashScope 10MB 限制
+        """所有视频统一ffmpeg压缩（输入一致性策略）"""
         file_size = os.path.getsize(video_path)
+        frame_count = self._get_video_frame_count(video_path)
 
-        if file_size <= max_size:
-            # 直接传
-            video_b64 = self._encode_video_to_base64(video_path)
-            contents = [{"video": video_b64}]
-            if instruction:
-                contents.append({"text": instruction})
-            if text:
-                contents.append({"text": text})
-            return self._call_api(contents)
-
-        # 大视频：压缩
-        print(f"  [Video] {os.path.basename(video_path)} 太大 ({file_size/1024/1024:.1f}MB), 压缩中...")
-        compressed_path = self._compress_video(video_path, max_size_mb=9)
-        if compressed_path and os.path.exists(compressed_path):
+        # ffmpeg 压缩，统一为 256px + 2fps + 100kbps
+        reason = f"({file_size/1024/1024:.1f}MB)" if frame_count >= 2 else f"帧数不足({frame_count})"
+        print(f"  [Video] {os.path.basename(video_path)} {reason}, 压缩中...")
+            
+        compressed_path = self._compress_video(video_path, max_size_mb=19)
+        if compressed_path and os.path.exists(compressed_path) and os.path.getsize(compressed_path) > 0:
             new_size = os.path.getsize(compressed_path)
             print(f"    压缩后: {new_size/1024/1024:.1f}MB")
-            if new_size <= max_size:
+            try:
                 video_b64 = self._encode_video_to_base64(compressed_path)
                 contents = [{"video": video_b64}]
                 if instruction:
@@ -206,25 +201,29 @@ class QwenVLEmbeddingAPI:
                 if text:
                     contents.append({"text": text})
                 result = self._call_api(contents)
+                self.stats["压缩视频"] += 1
                 try:
                     os.remove(compressed_path)
                 except:
                     pass
                 return result
+            except Exception as e:
+                print(f"    压缩后仍失败: {e}, 回退单帧...")
+                try:
+                    os.remove(compressed_path)
+                except:
+                    pass
 
-        # 如果压缩后还是大，用抽帧（但 multimodal-embedding-v1 只支持1张图，取中间帧）
-        print(f"    压缩不够小，改用单帧方案")
-        try:
-            frame_b64 = self._extract_single_frame(video_path)
-            contents = [{"image": frame_b64}]
-            if instruction:
-                contents.append({"text": instruction})
-            if text:
-                contents.append({"text": text})
-            return self._call_api(contents)
-        except Exception as e:
-            print(f"    抽帧失败: {e}, 跳过此视频")
-            raise
+        # 回退：单帧图片
+        print(f"    压缩失败，回退单帧图片...")
+        self.stats["回退图片"] += 1
+        frame_b64 = self._extract_single_frame(video_path)
+        contents = [{"image": frame_b64}]
+        if instruction:
+            contents.append({"text": instruction})
+        if text:
+            contents.append({"text": text})
+        return self._call_api(contents)
 
     def encode_video_with_frames(
         self, video_path: str, text: str = "", instruction: str = "", num_frames: int = 8
@@ -241,6 +240,18 @@ class QwenVLEmbeddingAPI:
     # ============================================================
     # 工具方法
     # ============================================================
+
+    @staticmethod
+    def _get_video_frame_count(video_path: str) -> int:
+        """获取视频总帧数"""
+        try:
+            import cv2
+            cap = cv2.VideoCapture(video_path)
+            count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            cap.release()
+            return count
+        except:
+            return 999  # 假设够用
 
     @staticmethod
     def _compress_video(video_path: str, max_size_mb: float = 9.0) -> str:
