@@ -181,32 +181,13 @@ class QwenVLEmbeddingAPI:
     def _encode_video_smart(
         self, video_path: str, text: str = "", instruction: str = ""
     ) -> np.ndarray:
-        """智能视频编码：≤13MB+≥2帧直传，否则压缩，失败回退单帧图片"""
-        max_size = 13 * 1024 * 1024  # base64膨胀后<20MB data-uri限制
+        """所有视频统一ffmpeg压缩（输入一致性策略）"""
         file_size = os.path.getsize(video_path)
         frame_count = self._get_video_frame_count(video_path)
 
-        # 路径1：直传原始视频
-        if file_size <= max_size and frame_count >= 2:
-            try:
-                video_b64 = self._encode_video_to_base64(video_path)
-                contents = [{"video": video_b64}]
-                if instruction:
-                    contents.append({"text": instruction})
-                if text:
-                    contents.append({"text": text})
-                result = self._call_api(contents)
-                self.stats["直传视频"] += 1
-                return result
-            except Exception as e:
-                print(f"  [Video] 直传失败: {e}, 尝试压缩...")
-
-        # 路径2：ffmpeg 压缩
-        reason = f"太大 ({file_size/1024/1024:.1f}MB)" if file_size > max_size else f"帧数不足({frame_count})"
-        if file_size <= max_size and frame_count >= 2:
-            print(f"  [Video] {os.path.basename(video_path)} 直传失败，压缩中...")
-        else:
-            print(f"  [Video] {os.path.basename(video_path)} {reason}, 压缩中...")
+        # ffmpeg 压缩，统一为 256px + 2fps + 100kbps
+        reason = f"({file_size/1024/1024:.1f}MB)" if frame_count >= 2 else f"帧数不足({frame_count})"
+        print(f"  [Video] {os.path.basename(video_path)} {reason}, 压缩中...")
             
         compressed_path = self._compress_video(video_path, max_size_mb=19)
         if compressed_path and os.path.exists(compressed_path) and os.path.getsize(compressed_path) > 0:
@@ -233,17 +214,16 @@ class QwenVLEmbeddingAPI:
                 except:
                     pass
 
-        # 路径3：终极回退 - 单帧图片
-        print(f"    回退单帧图片...")
+        # 回退：单帧图片
+        print(f"    压缩失败，回退单帧图片...")
+        self.stats["回退图片"] += 1
         frame_b64 = self._extract_single_frame(video_path)
         contents = [{"image": frame_b64}]
         if instruction:
             contents.append({"text": instruction})
         if text:
             contents.append({"text": text})
-        result = self._call_api(contents)
-        self.stats["回退图片"] += 1
-        return result
+        return self._call_api(contents)
 
     def encode_video_with_frames(
         self, video_path: str, text: str = "", instruction: str = "", num_frames: int = 8
