@@ -72,7 +72,13 @@ class Config:
     # embedding 提取参数 (API 调用)
     max_frames = 16
     fps = 2.0
-    api_delay = 0.5  # API 调用间隔 (秒), 避免限流
+    api_delay = 0.5
+
+    # OSS 配置 (URL 上传模式)
+    oss_bucket = "url11"
+    oss_endpoint = "oss-cn-beijing.aliyuncs.com"
+    oss_key_id = "LTAI5t798VpZRbj4dnLEA1hD"
+    oss_key_secret = "f1TlQAmUUmU9jY5Th0VlU5eHE8emp6"
     
     # 保存
     model_save_path = "classifier_head.pt"
@@ -327,6 +333,10 @@ def main():
             model_name=config.model_name,
             max_frames=config.max_frames,
             fps=config.fps,
+            oss_bucket=config.oss_bucket,
+            oss_endpoint=config.oss_endpoint,
+            oss_key_id=config.oss_key_id,
+            oss_key_secret=config.oss_key_secret,
         )
         
         embeddings, labels, samples = precompute_embeddings(

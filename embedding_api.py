@@ -48,6 +48,11 @@ class QwenVLEmbeddingAPI:
         normalize: bool = True,
         endpoint: str = None,
         max_retries: int = 3,
+        # OSS 配置
+        oss_bucket: str = None,
+        oss_endpoint: str = None,
+        oss_key_id: str = None,
+        oss_key_secret: str = None,
     ):
         self.api_key = api_key
         self.model_name = model_name
@@ -57,7 +62,20 @@ class QwenVLEmbeddingAPI:
         self.endpoint = endpoint or self._ENDPOINT
         self.max_retries = max_retries
         self.embedding_dim = self.EMBEDDING_DIMS.get(model_name, 2048)
-        self.stats = {"直传视频": 0, "压缩视频": 0, "回退图片": 0, "图片": 0}
+        self.stats = {"URL视频": 0, "回退图片": 0, "图片": 0}
+
+        # OSS 上传模式
+        self.use_oss = bool(oss_bucket and oss_key_id and oss_key_secret)
+        if self.use_oss:
+            import oss2
+            self.oss_bucket_name = oss_bucket
+            self.oss_endpoint = oss_endpoint or f"oss-cn-beijing.aliyuncs.com"
+            self.oss_auth = oss2.Auth(oss_key_id, oss_key_secret)
+            self.oss_bucket = oss2.Bucket(self.oss_auth, self.oss_endpoint, oss_bucket)
+            self._oss_url_map = {}  # 本地路径 → OSS URL 缓存
+            print(f"[EmbeddingAPI] OSS 模式: bucket={oss_bucket}")
+        else:
+            print(f"[EmbeddingAPI] base64 模式")
 
         print(f"[EmbeddingAPI] 初始化完成 (DashScope)")
         print(f"  Model: {model_name}, Dim: {self.embedding_dim}")
@@ -178,14 +196,42 @@ class QwenVLEmbeddingAPI:
         """视频 + 文字描述 同时编码（自动处理大视频）"""
         return self._encode_video_smart(video_path, text=text, instruction=instruction)
 
+    def _upload_to_oss(self, video_path: str) -> str:
+        """上传视频到 OSS，返回公网 URL（带缓存）"""
+        if video_path in self._oss_url_map:
+            return self._oss_url_map[video_path]
+        import hashlib
+        fname = os.path.basename(video_path)
+        obj_key = f"videos/{hashlib.md5(video_path.encode()).hexdigest()[:8]}_{fname}"
+        if self.oss_bucket.object_exists(obj_key):
+            oss_url = self.oss_bucket.sign_url('GET', obj_key, 86400)
+            self._oss_url_map[video_path] = oss_url
+            return oss_url
+        print(f"    [OSS] 上传中: {fname}...")
+        self.oss_bucket.put_object_from_file(obj_key, video_path)
+        oss_url = self.oss_bucket.sign_url('GET', obj_key, 86400)
+        self._oss_url_map[video_path] = oss_url
+        return oss_url
+
     def _encode_video_smart(
         self, video_path: str, text: str = "", instruction: str = ""
     ) -> np.ndarray:
-        """所有视频统一ffmpeg压缩（输入一致性策略）"""
-        file_size = os.path.getsize(video_path)
+        """视频编码：OSS URL 模式直传原始视频，非OSS 模式走压缩"""
         frame_count = self._get_video_frame_count(video_path)
 
-        # ffmpeg 压缩，统一为 256px + 2fps + 100kbps
+        if self.use_oss and frame_count >= 2:
+            oss_url = self._upload_to_oss(video_path)
+            contents = [{"video": oss_url}]
+            if instruction:
+                contents.append({"text": instruction})
+            if text:
+                contents.append({"text": text})
+            result = self._call_api(contents)
+            self.stats["URL视频"] += 1
+            return result
+
+        # 非 OSS 模式或帧数不足 → 压缩
+        file_size = os.path.getsize(video_path)
         reason = f"({file_size/1024/1024:.1f}MB)" if frame_count >= 2 else f"帧数不足({frame_count})"
         print(f"  [Video] {os.path.basename(video_path)} {reason}, 压缩中...")
             
@@ -201,7 +247,6 @@ class QwenVLEmbeddingAPI:
                 if text:
                     contents.append({"text": text})
                 result = self._call_api(contents)
-                self.stats["压缩视频"] += 1
                 try:
                     os.remove(compressed_path)
                 except:
@@ -214,8 +259,7 @@ class QwenVLEmbeddingAPI:
                 except:
                     pass
 
-        # 回退：单帧图片
-        print(f"    压缩失败，回退单帧图片...")
+        print(f"    回退单帧图片...")
         self.stats["回退图片"] += 1
         frame_b64 = self._extract_single_frame(video_path)
         contents = [{"image": frame_b64}]
