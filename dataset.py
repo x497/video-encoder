@@ -232,18 +232,16 @@ def collect_samples(
 def _extract_view(filename: str, patient_dir: str) -> str:
     """从文件名提取切面名称
     
-    示例: 
-      "陈桃花-20251212-60014895196-二腔.mp4"           → "二腔"
-      "陈桃花-20251212-60014895196-LV-GLS.jpg"         → "LV-GLS"
-      "陈海涛-20260611-2506729-LV-GLS2.jpg"            → "LV-GLS2"
-      "陈海涛-20260611-2506729-二腔.avi"               → "二腔"
+    示例:
+      旧格式: "陈桃花-20251212-60014895196-二腔.mp4"  → "二腔"
+      新格式: "P001_V1-二腔.mp4"                      → "二腔"
     """
     import re
     name = os.path.splitext(filename)[0]
-    # 尝试去掉患者名-日期-编号前缀
-    # 模式: 中文名-8位日期-数字编号-
-    # 也可能是: 中文名-7位日期-数字编号-
+    # 去掉旧格式前缀: 中文名-日期-编号-
     name = re.sub(r'^[\u4e00-\u9fa5]+-\d{7,8}-\d+[-=]?', '', name)
+    # 去掉新格式前缀: P001_V1-
+    name = re.sub(r'^P\d{3}_V\d+-', '', name)
     return name
 
 
