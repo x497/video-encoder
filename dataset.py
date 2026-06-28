@@ -382,7 +382,7 @@ def create_dataloaders(
         dataset, [train_size, val_size], generator=generator
     )
     
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
     
     print(f"\n数据集划分:")
@@ -392,21 +392,133 @@ def create_dataloaders(
     return train_loader, val_loader
 
 
-def test_dataloader():
-    """测试数据加载"""
-    print("=" * 60)
-    print("测试数据加载器")
-    print("=" * 60)
+# ============================================================
+# 4. 患者级聚合：5切面拼接
+# ============================================================
+
+def collect_patients(root_dir: str, compressed_dir: str = None) -> List[Dict]:
+    """按患者收集，每个患者聚合 5 个切面
     
-    root_dir = os.path.dirname(__file__)
-    samples = collect_samples(root_dir)
+    切面顺序（固定）: 二腔(video) → 三腔(video) → 四腔(video) → LV-GLS(image) → RV-GLS(image)
+    取每个切面的第一个匹配文件，忽略多余的（如 LV-GLS-1）
     
-    # 打印前5个样本
-    print("\n前5个样本:")
-    for s in samples[:5]:
-        print(f"  [{s['label']}] {s['patient_name']} | {s['view']} | {s['media_type']}")
+    Returns:
+        patients: [{patient_id, label, views: [{type, path, view, desc}]}, ...]
+    """
+    if compressed_dir is None:
+        compressed_dir = os.path.join(root_dir, "压缩文件夹")
     
-    return samples
+    label_map = {"HOCM玛法凯泰 影像": 1, "体检中心影像": 0}
+    desc_map = load_view_descriptions()
+    
+    # 固定切面顺序
+    VIEW_ORDER = [
+        {"view_key": "二腔", "type": "video", "ext": [".mp4"]},
+        {"view_key": "三腔", "type": "video", "ext": [".mp4"]},
+        {"view_key": "四腔", "type": "video", "ext": [".mp4"]},
+        {"view_key": "LV-GLS", "type": "image", "ext": [".jpg", ".jpeg", ".png"]},
+        {"view_key": "RV-GLS", "type": "image", "ext": [".jpg", ".jpeg", ".png"]},
+    ]
+    
+    patients = []
+    
+    for folder_name, label in label_map.items():
+        folder_path = os.path.join(compressed_dir, folder_name)
+        if not os.path.exists(folder_path):
+            print(f"[WARNING] 文件夹不存在: {folder_path}")
+            continue
+        
+        for patient_dir in sorted(os.listdir(folder_path)):
+            pp = os.path.join(folder_path, patient_dir)
+            if not os.path.isdir(pp):
+                continue
+            
+            # 提取匿名ID
+            import re
+            match = re.match(r'(P\d+)_(V\d+)', patient_dir)
+            patient_id = match.group(0) if match else patient_dir
+            
+            views = []
+            for vdef in VIEW_ORDER:
+                found = None
+                for ext in vdef["ext"]:
+                    for f in sorted(os.listdir(pp)):
+                        if f.endswith(ext) and vdef["view_key"] in f and '-1' not in f:
+                            found = f
+                            break
+                    if found:
+                        break
+                if found:
+                    view_name = _extract_view(found, patient_dir)
+                    view_desc = get_view_description(view_name, desc_map)
+                    views.append({
+                        "type": vdef["type"],
+                        "path": os.path.join(pp, found),
+                        "view": view_name,
+                        "desc": view_desc,
+                    })
+            
+            if len(views) == 5:
+                patients.append({
+                    "patient_id": patient_id,
+                    "label": label,
+                    "views": views,
+                })
+    
+    pos = sum(1 for p in patients if p["label"] == 1)
+    neg = sum(1 for p in patients if p["label"] == 0)
+    print(f"\n患者级收集: {len(patients)} 患者 (HOCM: {pos}, Normal: {neg})")
+    return patients
+
+
+def precompute_patient_embeddings(
+    patients: List[Dict],
+    embedding_api,
+    cache_path: str = "patient_embeddings_cache.pt",
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """对每个患者的 5 个切面分别编码，拼接为 (5*dim) 维向量
+    
+    Returns:
+        embeddings: (N, 5*dim) 拼接后的患者级 embedding
+        labels: (N,)
+    """
+    if os.path.exists(cache_path):
+        print(f"[Cache] 加载患者缓存: {cache_path}")
+        data = torch.load(cache_path, map_location="cpu", weights_only=False)
+        return data["embeddings"], data["labels"]
+    
+    embeddings_list = []
+    labels_list = []
+    fail_count = 0
+    
+    for patient in tqdm(patients, desc="患者级编码"):
+        try:
+            view_embs = []
+            for view in patient["views"]:
+                if view["type"] == "video":
+                    emb = embedding_api.encode_video_with_text(
+                        view["path"], text=view["desc"]
+                    )
+                else:
+                    emb = embedding_api.encode_image_with_text(
+                        view["path"], text=view["desc"]
+                    )
+                view_embs.append(torch.from_numpy(emb.squeeze(0)))
+            
+            # 拼接 5 个切面: (5*dim,)
+            concat_emb = torch.cat(view_embs, dim=0)
+            embeddings_list.append(concat_emb)
+            labels_list.append(patient["label"])
+        except Exception as e:
+            print(f"\n[WARNING] {patient['patient_id']} 失败: {e}")
+            fail_count += 1
+    
+    embeddings = torch.stack(embeddings_list)
+    labels = torch.tensor(labels_list, dtype=torch.long)
+    
+    torch.save({"embeddings": embeddings, "labels": labels}, cache_path)
+    print(f"[Cache] 患者级: {len(embeddings_list)} 患者, dim={embeddings.shape[1]}, 失败{fail_count}")
+    return embeddings, labels
 
 
 if __name__ == "__main__":

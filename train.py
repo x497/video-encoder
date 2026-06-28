@@ -33,7 +33,7 @@ import numpy as np
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, confusion_matrix
 
 # 导入自定义模块
-from dataset import collect_samples, precompute_embeddings, create_dataloaders
+from dataset import collect_samples, collect_patients, precompute_embeddings, precompute_patient_embeddings, create_dataloaders
 from classifier_model import OfflineClassifier
 from embedding_api import QwenVLEmbeddingAPI
 
@@ -49,33 +49,29 @@ class Config:
         "HOCM玛法凯泰 影像": 1,
         "体检中心影像": 0,
     }
-    cache_path = "embeddings_cache.pt"
+    cache_path = "patient_embeddings_cache.pt"  # 患者级缓存
     
     # DashScope API
-    api_key = None  # 从环境变量 DASHSCOPE_API_KEY 或 .api_key 文件读取
+    api_key = None
     model_name = "qwen3-vl-embedding"  # 2560 维
     embedding_dim = 2560
+    patient_dim = 5 * 2560  # 5个切面拼接 = 12800
     hidden_dims = [512, 128]
     dropout = 0.3
     num_classes = 2
     
     # 训练
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    epochs = 50
-    batch_size = 16
+    epochs = 100  # 患者级样本少，多训练几轮
+    batch_size = 4
     learning_rate = 1e-3
     weight_decay = 1e-4
     train_ratio = 0.8
     seed = 42
-    patience = 10
-    
-    # embedding 提取参数 (API 调用)
-    max_frames = 16
-    fps = 2.0
-    api_delay = 0.5  # API 调用间隔 (秒), 避免限流
+    patience = 15
     
     # 保存
-    model_save_path = "classifier_head.pt"
+    model_save_path = "patient_classifier_head.pt"
 
 
 def set_seed(seed: int):
@@ -165,7 +161,7 @@ def train(config: Config):
     """主训练流程"""
     set_seed(config.seed)
     print(f"\n设备: {config.device}")
-    print(f"Embedding 维度: {config.embedding_dim}")
+    print(f"患者级 Embedding 维度: {config.patient_dim} (5×{config.embedding_dim})")
     
     # 1. 加载数据
     if not os.path.exists(config.cache_path):
@@ -186,9 +182,9 @@ def train(config: Config):
         seed=config.seed,
     )
     
-    # 3. 创建模型
+    # 3. 创建模型 (输入维度 = 5 * 2560 = 12800)
     model = OfflineClassifier(
-        input_dim=config.embedding_dim,
+        input_dim=config.patient_dim,
         hidden_dims=config.hidden_dims,
         dropout=config.dropout,
         num_classes=config.num_classes,
@@ -308,29 +304,26 @@ def main():
     # === Mode: collect ===
     if args.mode in ("collect", "all"):
         print("=" * 60)
-        print("Step 1: 收集数据")
+        print("Step 1: 收集患者数据")
         print("=" * 60)
-        samples = collect_samples(root_dir, config.label_map)
+        patients = collect_patients(root_dir)
     
     # === Mode: precompute ===
     if args.mode in ("precompute", "all"):
         print("\n" + "=" * 60)
-        print("Step 2: 预提取 Embedding")
+        print("Step 2: 患者级 Embedding 预提取")
         print("=" * 60)
         
-        # 如果还没收集过样本，先收集
         if args.mode == "precompute":
-            samples = collect_samples(root_dir, config.label_map)
+            patients = collect_patients(root_dir)
         
         api = QwenVLEmbeddingAPI(
             api_key=config.api_key,
             model_name=config.model_name,
-            max_frames=config.max_frames,
-            fps=config.fps,
         )
         
-        embeddings, labels, samples = precompute_embeddings(
-            samples, api, cache_path=config.cache_path
+        embeddings, labels = precompute_patient_embeddings(
+            patients, api, cache_path=config.cache_path
         )
     
     # === Mode: train ===
