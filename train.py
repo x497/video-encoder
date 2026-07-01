@@ -66,7 +66,7 @@ class Config:
     batch_size = 4
     learning_rate = 1e-3
     weight_decay = 1e-4
-    train_ratio = 0.8
+    train_ratio = 0.7
     seed = 42
     patience = 15
     
