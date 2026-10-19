@@ -31,23 +31,26 @@ class QwenVLEmbeddingAPI:
     # DashScope 多模态 embedding endpoint
     _ENDPOINT = "https://dashscope.aliyuncs.com/api/v1/services/embeddings/multimodal-embedding/multimodal-embedding"
 
-    # 支持的模型
+    # 支持的模型 (维度来自阿里云百炼官方文档)
+    # 注意: 不存在 qwen3-vl-embedding-2b / -8b, 使用会返回 AccessDenied
     EMBEDDING_DIMS = {
-        "qwen3-vl-embedding-2b": 2048,
-        "qwen3-vl-embedding-8b": 4096,
-        "qwen-vl-embedding2": 2560,
+        "qwen3-vl-embedding": 2560,          # 默认 2560, 可设 2048/1536/1024/768/512/256
+        "qwen2.5-vl-embedding": 1024,        # 默认 1024, 可设 2048/768/512
+        "tongyi-embedding-vision-plus": 1152,
+        "tongyi-embedding-vision-flash": 768,
         "multimodal-embedding-v1": 1024,
     }
 
     def __init__(
         self,
         api_key: str,
-        model_name: str = "qwen3-vl-embedding-2b",
+        model_name: str = "qwen3-vl-embedding",
         max_frames: int = 16,
         fps: float = 2.0,
         normalize: bool = True,
         endpoint: str = None,
         max_retries: int = 3,
+        enable_fusion: bool = True,
     ):
         self.api_key = api_key
         self.model_name = model_name
@@ -56,11 +59,15 @@ class QwenVLEmbeddingAPI:
         self.normalize = normalize
         self.endpoint = endpoint or self._ENDPOINT
         self.max_retries = max_retries
-        self.embedding_dim = self.EMBEDDING_DIMS.get(model_name, 2048)
+        # 融合模式: qwen3-vl-embedding 必须开启才会把图文融合为 1 个向量，
+        # 否则返回独立向量(图片一个、文字一个)，文字会被丢弃。
+        self.enable_fusion = enable_fusion
+        self.embedding_dim = self.EMBEDDING_DIMS.get(model_name, 2560)
         self.stats = {"直传视频": 0, "压缩视频": 0, "回退图片": 0, "图片": 0}
 
         print(f"[EmbeddingAPI] 初始化完成 (DashScope)")
         print(f"  Model: {model_name}, Dim: {self.embedding_dim}")
+        print(f"  enable_fusion: {self.enable_fusion}")
         print(f"  Endpoint: {self.endpoint}")
 
     # ============================================================
@@ -79,6 +86,9 @@ class QwenVLEmbeddingAPI:
             "input": {"contents": contents},
             "parameters": {},
         }
+        # 融合模式: 图文融合为单个向量 (缺省会导致文字被丢弃)
+        if self.enable_fusion:
+            payload["parameters"]["enable_fusion"] = True
         if extra_params:
             payload["parameters"].update(extra_params)
 
@@ -117,7 +127,13 @@ class QwenVLEmbeddingAPI:
         raise RuntimeError(f"API 调用失败，已重试 {self.max_retries} 次")
 
     def _parse_response(self, data: Dict) -> np.ndarray:
-        """解析 DashScope 返回的 embedding"""
+        """解析 DashScope 返回的 embedding
+
+        重要: 多模态返回有两种模式
+          - 融合模式(enable_fusion=true): 返回 1 个 type="fusion" 向量
+          - 独立模式(默认): 每个输入各返回 1 个向量 (如 image 一个、text 一个)
+        本函数优先取 fusion 向量；若为独立模式则取第一个。
+        """
         output = data.get("output", {})
         embeddings = output.get("embeddings", [])
 
@@ -128,7 +144,16 @@ class QwenVLEmbeddingAPI:
             else:
                 raise RuntimeError(f"未知返回格式: {json.dumps(data, ensure_ascii=False)[:500]}")
 
-        emb = embeddings[0].get("embedding", [])
+        # 优先选择融合向量
+        chosen = None
+        for e in embeddings:
+            if isinstance(e, dict) and e.get("type") == "fusion":
+                chosen = e
+                break
+        if chosen is None:
+            chosen = embeddings[0]
+
+        emb = chosen.get("embedding", []) if isinstance(chosen, dict) else chosen
         emb_array = np.array(emb, dtype=np.float32).reshape(1, -1)
 
         if self.normalize:
